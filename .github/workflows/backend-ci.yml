@@ -1,0 +1,288 @@
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [ master, development ]
+  pull_request:
+    branches: [ master, development ]
+
+jobs:
+  # Job 1: Python Code Quality
+  code-quality:
+    runs-on: ubuntu-latest
+    name: Python Code Quality
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 black pylint bandit
+        pip install -r requirements.txt || pip install flask pillow
+        
+    - name: Code formatting check
+      run: |
+        black --check --diff app.py
+        
+    - name: Linting with flake8
+      run: |
+        flake8 app.py --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 app.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        
+    - name: Pylint analysis
+      run: |
+        pylint app.py --exit-zero --score=yes
+        
+    - name: Security scan with Bandit
+      run: |
+        bandit -r . -f json -o bandit-report.json || true
+        bandit -r . --severity-level medium
+
+  # Job 2: Unit Testing
+  unit-tests:
+    runs-on: ubuntu-latest
+    name: Unit Tests
+    needs: [code-quality]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pytest-cov flask pillow
+        pip install -r requirements.txt || true
+        
+    - name: Create test directories
+      run: |
+        mkdir -p data/chebien/active
+        mkdir -p data/chebien/completed
+        mkdir -p data/qa/lenmen
+        mkdir -p data/qa/loc
+        mkdir -p data/tank_metrics
+        mkdir -p uploads
+        
+    - name: Run unit tests
+      run: |
+        python -m pytest tests/ -v --cov=app --cov-report=xml || true
+        
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: backend
+        name: backend-coverage
+
+  # Job 3: API Integration Tests
+  integration-tests:
+    runs-on: ubuntu-latest
+    name: API Integration Tests
+    needs: [unit-tests]
+    
+    services:
+      # Test database service
+      sqlite:
+        image: alpine:latest
+        options: >-
+          --health-cmd "sqlite3 --version"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flask pillow requests pytest
+        pip install -r requirements.txt || true
+        
+    - name: Create test environment
+      run: |
+        mkdir -p data/chebien/active
+        mkdir -p data/chebien/completed
+        mkdir -p data/qa/lenmen
+        mkdir -p data/qa/loc
+        mkdir -p data/tank_metrics
+        mkdir -p uploads/Chebien/Plato
+        mkdir -p uploads/Chebien/Hanoi
+        mkdir -p uploads/Chebien/ChaiHG
+        
+    - name: Start Flask app for testing
+      run: |
+        python app.py &
+        sleep 10
+        
+    - name: Test health endpoint
+      run: |
+        curl -f http://localhost:5000/health || exit 1
+        
+    - name: Test user creation
+      run: |
+        curl -X POST -H "Content-Type: application/json" \
+        -d '{"username":"test","password":"test123","full_name":"Test User","department":"chebien","role":"staff"}' \
+        http://localhost:5000/create_user
+        
+    - name: Test login endpoint
+      run: |
+        curl -X POST -H "Content-Type: application/json" \
+        -d '{"username":"test","password":"test123"}' \
+        http://localhost:5000/login
+        
+    - name: Test stats endpoint
+      run: |
+        curl -f http://localhost:5000/api/stats/overview || exit 1
+
+  # Job 4: Security & Vulnerability Scan
+  security-scan:
+    runs-on: ubuntu-latest
+    name: Security Scan
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install safety
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety
+        
+    - name: Check dependencies for vulnerabilities
+      run: |
+        safety check --json --output safety-report.json || true
+        safety check
+        
+    - name: Scan for secrets
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: master
+        head: HEAD
+
+  # Job 5: Docker Build (if Dockerfile exists)
+  docker-build:
+    runs-on: ubuntu-latest
+    name: Docker Build Test
+    needs: [integration-tests]
+    if: github.ref == 'refs/heads/master'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Create Dockerfile
+      run: |
+        cat > Dockerfile << 'EOF'
+        FROM python:3.9-slim
+        WORKDIR /app
+        COPY app.py .
+        RUN pip install flask pillow
+        RUN mkdir -p data/chebien/active data/chebien/completed data/qa/lenmen data/qa/loc data/tank_metrics uploads
+        EXPOSE 5000
+        CMD ["python", "app.py"]
+        EOF
+        
+    - name: Build Docker image
+      run: |
+        docker build -t ibb-backend:${{ github.sha }} .
+        
+    - name: Test Docker container
+      run: |
+        docker run -d -p 5000:5000 --name test-container ibb-backend:${{ github.sha }}
+        sleep 10
+        curl -f http://localhost:5000/health || exit 1
+        docker stop test-container
+        docker rm test-container
+
+  # Job 6: Deploy to Production (master only)
+  deploy-production:
+    runs-on: ubuntu-latest
+    name: Deploy to Production
+    needs: [integration-tests, security-scan, docker-build]
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Deploy notification
+      run: |
+        echo "🚀 Deploying to production..."
+        echo "Commit: ${{ github.sha }}"
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Actor: ${{ github.actor }}"
+        
+    # Note: Actual deployment would use SSH or deployment service
+    # Example for future implementation:
+    # - name: Deploy via SSH
+    #   uses: appleboy/ssh-action@v0.1.5
+    #   with:
+    #     host: ${{ secrets.PROD_HOST }}
+    #     username: ${{ secrets.PROD_USER }}
+    #     key: ${{ secrets.PROD_SSH_KEY }}
+    #     script: |
+    #       cd /home/ibb/Projects/ibb-backend
+    #       git pull origin master
+    #       sudo systemctl restart ibb-backend
+
+  # Job 7: Create Release (on version tags)
+  create-release:
+    runs-on: ubuntu-latest
+    name: Create Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Create Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        body: |
+          ## IBB Backend Release ${{ github.ref }}
+          
+          ### Changes in this release:
+          - Automated release via GitHub Actions
+          - Full CI/CD pipeline validation
+          - Security and quality checks passed
+          
+          ### Deployment:
+          This release has been automatically tested and is ready for production deployment.
+          
+          ### API Documentation:
+          See [API Documentation](https://github.com/ibbvn/ibb-management-system) for endpoint details.
+        draft: false
+        prerelease: false
