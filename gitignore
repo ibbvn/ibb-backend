@@ -63,3 +63,10 @@ Thumbs.db
 *.tmp
 *.temp
 tmp/
+
+venv/
+*.db
+data/
+uploads/
+.env
+__pycache__/
