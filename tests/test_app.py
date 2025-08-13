@@ -108,6 +108,21 @@ class IBBBackendTestCase(unittest.TestCase):
         
         data = json.loads(response.data)
         self.assertFalse(data['success'])
+
+    def test_login_missing_password(self):
+        """Login should fail gracefully when password is missing"""
+        login_data = {
+            'username': 'user_without_password'
+        }
+
+        response = self.app.post('/login',
+                                data=json.dumps(login_data),
+                                content_type='application/json')
+
+        self.assertEqual(response.status_code, 400)
+        data = json.loads(response.data)
+        self.assertFalse(data['success'])
+        self.assertIn('required', data['message'])
     
     def test_save_form_validation(self):
         """Test form data validation"""

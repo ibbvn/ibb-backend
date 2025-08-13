@@ -68,6 +68,8 @@ def create_user_table():
         conn.commit()
 
 def hash_password(password):
+    if password is None:
+        raise ValueError("Password cannot be None")
     return hashlib.sha256(password.encode()).hexdigest()
 
 def allowed_file(filename):
@@ -92,9 +94,14 @@ def compress_image(image_path, quality=85):
 
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.json
+    data = request.json or {}
     username = data.get('username')
     password = data.get('password')
+
+    # Ensure required credentials are provided
+    if not username or not password:
+        return jsonify({'success': False, 'message': 'Username and password are required'}), 400
+
     password_hash = hash_password(password)
 
     with sqlite3.connect(DB_PATH) as conn:
